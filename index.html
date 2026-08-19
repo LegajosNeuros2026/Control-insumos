@@ -114,13 +114,14 @@
       <input type="text" id="inpNota" placeholder="Ej: pedido a proveedor X">
 
       <button class="btn" id="btnGuardar">Guardar movimiento</button>
+      <button class="btn secondary" id="btnCancelarEdicion" style="display:none;">Cancelar edición</button>
       <div class="msg" id="msgRegistrar"></div>
     </div>
 
     <div class="card">
       <h2>Últimos movimientos</h2>
       <table>
-        <thead><tr><th>Fecha</th><th>Tipo</th><th>Insumo</th><th>Cant.</th><th>Área</th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Tipo</th><th>Insumo</th><th>Cant.</th><th>Área</th><th></th></tr></thead>
         <tbody id="tblUltimos"></tbody>
       </table>
     </div>
@@ -203,12 +204,12 @@
    los datos de CUD.
 ========================================================= */
 const firebaseConfig = {
-  apiKey: "TU_API_KEY",
-  authDomain: "TU_PROYECTO.firebaseapp.com",
-  projectId: "TU_PROYECTO",
-  storageBucket: "TU_PROYECTO.appspot.com",
-  messagingSenderId: "TU_SENDER_ID",
-  appId: "TU_APP_ID"
+  apiKey: "AIzaSyDpjKJEhIhLEuphpWQViyW0jUs4yDEsWhc",
+  authDomain: "insumos-app-3314c.firebaseapp.com",
+  projectId: "insumos-app-3314c",
+  storageBucket: "insumos-app-3314c.firebasestorage.app",
+  messagingSenderId: "269233425774",
+  appId: "1:269233425774:web:fa120b1575fd5aa19f857f"
 };
 
 firebase.initializeApp(firebaseConfig);
@@ -231,6 +232,7 @@ let insumos = [];      // [{id, nombre, unidad, stock, minCant, minDias}]
 let movimientos = [];  // [{id, tipo, insumoId, insumoNombre, cantidad, area, quien, nota, fecha}]
 let tipoActual = "retiro";
 let periodoActual = 30;
+let editingId = null;
 let charts = {};
 
 /* ---------- NAV ---------- */
@@ -311,26 +313,64 @@ document.getElementById("btnGuardar").addEventListener("click", async ()=>{
   if(!fecha){ showMsg(msg,"Ingresá una fecha.",true); return; }
 
   const insumo = insumos.find(i=>i.id===insumoId);
-  if(tipoActual==="retiro" && cantidad > insumo.stock){
-    if(!confirm(`El retiro (${cantidad}) supera el stock actual (${insumo.stock}). ¿Registrar igual?`)) return;
-  }
 
   try{
-    await db.runTransaction(async t=>{
-      const ref = db.collection(COL_INSUMOS).doc(insumoId);
-      const doc = await t.get(ref);
-      const stockActual = doc.data().stock || 0;
-      const nuevoStock = tipoActual==="retiro" ? stockActual - cantidad : stockActual + cantidad;
-      t.update(ref, {stock: nuevoStock});
-      const movRef = db.collection(COL_MOVS).doc();
-      t.set(movRef, {
-        tipo: tipoActual,
-        insumoId, insumoNombre: insumo.nombre,
-        cantidad, area, quien: quien || null, nota: nota || null,
-        fecha, timestamp: firebase.firestore.FieldValue.serverTimestamp()
+    if(editingId){
+      // EDICIÓN de un movimiento existente
+      const movOriginal = movimientos.find(m=>m.id===editingId);
+      if(!movOriginal){ showMsg(msg,"No se encontró el movimiento original.",true); return; }
+
+      await db.runTransaction(async t=>{
+        const oldInsumoRef = db.collection(COL_INSUMOS).doc(movOriginal.insumoId);
+        const oldInsumoDoc = await t.get(oldInsumoRef);
+
+        if(movOriginal.insumoId === insumoId){
+          // mismo insumo: revertimos el efecto viejo y aplicamos el nuevo sobre el mismo doc
+          let stock = oldInsumoDoc.data().stock || 0;
+          stock += (movOriginal.tipo==="retiro" ? movOriginal.cantidad : -movOriginal.cantidad); // revertir
+          stock += (tipoActual==="retiro" ? -cantidad : cantidad); // aplicar nuevo
+          t.update(oldInsumoRef, {stock});
+        } else {
+          // insumo distinto: revertimos en el viejo y aplicamos en el nuevo
+          const newInsumoRef = db.collection(COL_INSUMOS).doc(insumoId);
+          const newInsumoDoc = await t.get(newInsumoRef);
+          let oldStock = oldInsumoDoc.data().stock || 0;
+          oldStock += (movOriginal.tipo==="retiro" ? movOriginal.cantidad : -movOriginal.cantidad);
+          t.update(oldInsumoRef, {stock: oldStock});
+          let newStock = newInsumoDoc.data().stock || 0;
+          newStock += (tipoActual==="retiro" ? -cantidad : cantidad);
+          t.update(newInsumoRef, {stock: newStock});
+        }
+
+        const movRef = db.collection(COL_MOVS).doc(editingId);
+        t.update(movRef, {
+          tipo: tipoActual, insumoId, insumoNombre: insumo.nombre,
+          cantidad, area, quien: quien || null, nota: nota || null, fecha
+        });
       });
-    });
-    showMsg(msg, "Movimiento registrado ✅", false);
+      showMsg(msg, "Movimiento editado ✅", false);
+      cancelarEdicion();
+    } else {
+      // CREACIÓN de un movimiento nuevo
+      if(tipoActual==="retiro" && cantidad > insumo.stock){
+        if(!confirm(`El retiro (${cantidad}) supera el stock actual (${insumo.stock}). ¿Registrar igual?`)) return;
+      }
+      await db.runTransaction(async t=>{
+        const ref = db.collection(COL_INSUMOS).doc(insumoId);
+        const doc = await t.get(ref);
+        const stockActual = doc.data().stock || 0;
+        const nuevoStock = tipoActual==="retiro" ? stockActual - cantidad : stockActual + cantidad;
+        t.update(ref, {stock: nuevoStock});
+        const movRef = db.collection(COL_MOVS).doc();
+        t.set(movRef, {
+          tipo: tipoActual,
+          insumoId, insumoNombre: insumo.nombre,
+          cantidad, area, quien: quien || null, nota: nota || null,
+          fecha, timestamp: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      });
+      showMsg(msg, "Movimiento registrado ✅", false);
+    }
     document.getElementById("inpCantidad").value = "";
     document.getElementById("inpQuien").value = "";
     document.getElementById("inpNota").value = "";
@@ -338,6 +378,52 @@ document.getElementById("btnGuardar").addEventListener("click", async ()=>{
     showMsg(msg, "Error al guardar: " + e.message, true);
   }
 });
+
+document.getElementById("btnCancelarEdicion").addEventListener("click", cancelarEdicion);
+
+function cancelarEdicion(){
+  editingId = null;
+  document.getElementById("btnGuardar").textContent = "Guardar movimiento";
+  document.getElementById("btnCancelarEdicion").style.display = "none";
+  document.getElementById("inpCantidad").value = "";
+  document.getElementById("inpQuien").value = "";
+  document.getElementById("inpNota").value = "";
+}
+
+function empezarEdicion(id){
+  const m = movimientos.find(x=>x.id===id);
+  if(!m) return;
+  editingId = id;
+  setTipo(m.tipo);
+  document.getElementById("selInsumo").value = m.insumoId;
+  document.getElementById("inpCantidad").value = m.cantidad;
+  document.getElementById("inpFecha").value = m.fecha;
+  if(m.tipo==="retiro") document.getElementById("selArea").value = m.area || "";
+  document.getElementById("inpQuien").value = m.quien || "";
+  document.getElementById("inpNota").value = m.nota || "";
+  document.getElementById("btnGuardar").textContent = "Guardar cambios";
+  document.getElementById("btnCancelarEdicion").style.display = "block";
+  document.querySelector('#nav button[data-tab="registrar"]').click();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+async function eliminarMovimiento(id){
+  const m = movimientos.find(x=>x.id===id);
+  if(!m) return;
+  if(!confirm(`¿Eliminar este movimiento de ${m.cantidad} ${m.insumoNombre} (${m.tipo}) del ${m.fecha}? El stock se ajustará automáticamente.`)) return;
+  try{
+    await db.runTransaction(async t=>{
+      const insumoRef = db.collection(COL_INSUMOS).doc(m.insumoId);
+      const insumoDoc = await t.get(insumoRef);
+      let stock = insumoDoc.data().stock || 0;
+      stock += (m.tipo==="retiro" ? m.cantidad : -m.cantidad); // revertir efecto
+      t.update(insumoRef, {stock});
+      t.delete(db.collection(COL_MOVS).doc(id));
+    });
+  }catch(e){
+    alert("Error al eliminar: " + e.message);
+  }
+}
 
 function showMsg(el, text, isError){
   el.textContent = text;
@@ -354,7 +440,18 @@ function renderUltimos(){
       <td>${m.insumoNombre}</td>
       <td>${m.cantidad}</td>
       <td>${m.area || "-"}</td>
-    </tr>`).join("") || `<tr><td colspan="5" class="muted">Sin movimientos todavía.</td></tr>`;
+      <td>
+        <button class="small-btn" data-editmov="${m.id}">Editar</button>
+        <button class="small-btn danger" data-delmov="${m.id}">Eliminar</button>
+      </td>
+    </tr>`).join("") || `<tr><td colspan="6" class="muted">Sin movimientos todavía.</td></tr>`;
+
+  tb.querySelectorAll("[data-editmov]").forEach(btn=>{
+    btn.addEventListener("click", ()=> empezarEdicion(btn.dataset.editmov));
+  });
+  tb.querySelectorAll("[data-delmov]").forEach(btn=>{
+    btn.addEventListener("click", ()=> eliminarMovimiento(btn.dataset.delmov));
+  });
 }
 
 /* ---------- STOCK ---------- */
