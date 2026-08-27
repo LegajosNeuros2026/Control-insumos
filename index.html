@@ -7,6 +7,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
     --azul:#1d4e89; --azul-claro:#e8f1fb; --verde:#2e9e5b; --amarillo:#e0a800; --rojo:#d64545;
@@ -99,13 +100,7 @@
 
       <div id="campoArea">
         <label>Área que retira</label>
-        <select id="selArea">
-          <option>PAO</option>
-          <option>Administración</option>
-          <option>Profesionales</option>
-          <option>PAMI</option>
-          <option>PAMI Pucará</option>
-        </select>
+        <select id="selArea"></select>
         <label>Quién retira (opcional)</label>
         <input type="text" id="inpQuien" placeholder="Nombre">
       </div>
@@ -142,6 +137,12 @@
   <!-- ANALISIS -->
   <section id="tab-analisis">
     <div class="card">
+      <h2>Exportar</h2>
+      <p class="muted">Descargá el registro completo de movimientos (ingresos y retiros) en un Excel.</p>
+      <button class="btn secondary" id="btnExportarExcel" style="width:auto;padding:10px 20px;">📥 Descargar Excel</button>
+      <div class="msg" id="msgExportar"></div>
+    </div>
+    <div class="card">
       <div class="filters" id="filtroPeriodo">
         <button data-dias="30" class="active">Últimos 30 días</button>
         <button data-dias="90">Últimos 90 días</button>
@@ -163,6 +164,20 @@
 
   <!-- CONFIG -->
   <section id="tab-config">
+    <div class="card">
+      <h2>Áreas que retiran</h2>
+      <p class="muted">Estas son las opciones que aparecen en el desplegable "Área que retira" al registrar un retiro.</p>
+      <table>
+        <thead><tr><th>Área</th><th></th></tr></thead>
+        <tbody id="tblConfigAreas"></tbody>
+      </table>
+      <div class="row" style="margin-top:10px;">
+        <div><label>Nueva área</label><input id="cfgNuevaArea" placeholder="Ej: Depósito"></div>
+      </div>
+      <button class="btn secondary" id="btnAgregarArea">+ Agregar área</button>
+      <div class="msg" id="msgAreas"></div>
+    </div>
+
     <div class="card">
       <h2>Insumos</h2>
       <table>
@@ -216,6 +231,9 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const COL_INSUMOS = "insumos_stock";
 const COL_MOVS = "insumos_movimientos";
+const COL_CONFIG = "insumos_config";
+
+const AREAS_POR_DEFECTO = ["PAO","Administración","Profesionales","PAMI","PAMI Pucará"];
 
 const DEFAULT_ITEMS = [
   {nombre:"Café", unidad:"kg", minCant:1, minDias:7},
@@ -230,6 +248,7 @@ const DEFAULT_ITEMS = [
 
 let insumos = [];      // [{id, nombre, unidad, stock, minCant, minDias}]
 let movimientos = [];  // [{id, tipo, insumoId, insumoNombre, cantidad, area, quien, nota, fecha}]
+let areas = [];         // ["PAO","Administración",...]
 let tipoActual = "retiro";
 let periodoActual = 30;
 let editingId = null;
@@ -271,6 +290,7 @@ async function init(){
     }
     listenInsumos();
     listenMovimientos();
+    listenAreas();
   }catch(e){
     document.getElementById("estadoConexion").textContent = "⚠️ No se pudo conectar a Firebase. Revisá firebaseConfig. (" + e.message + ")";
   }
@@ -292,6 +312,74 @@ function listenMovimientos(){
     renderAnalisis();
   });
 }
+
+function listenAreas(){
+  const ref = db.collection(COL_CONFIG).doc("areas");
+  ref.onSnapshot(async snap=>{
+    if(!snap.exists){
+      // primera vez: creamos el doc con la lista actual, sin perder nada
+      await ref.set({lista: AREAS_POR_DEFECTO});
+      return; // el propio set va a disparar este mismo onSnapshot de nuevo
+    }
+    areas = snap.data().lista || [];
+    renderSelArea();
+    renderConfigAreas();
+  });
+}
+
+function renderSelArea(){
+  const sel = document.getElementById("selArea");
+  const actual = sel.value;
+  sel.innerHTML = areas.map(a=>`<option>${a}</option>`).join("");
+  if(areas.includes(actual)) sel.value = actual;
+}
+
+function renderConfigAreas(){
+  const tb = document.getElementById("tblConfigAreas");
+  tb.innerHTML = areas.map((a,idx)=>`
+    <tr>
+      <td><input type="text" value="${a}" data-areaidx="${idx}" style="max-width:260px"></td>
+      <td>
+        <button class="small-btn" data-savearea="${idx}">Guardar</button>
+        <button class="small-btn danger" data-delarea="${idx}">Eliminar</button>
+      </td>
+    </tr>`).join("") || `<tr><td colspan="2" class="muted">No hay áreas cargadas.</td></tr>`;
+
+  tb.querySelectorAll("[data-savearea]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      const idx = parseInt(btn.dataset.savearea);
+      const input = tb.querySelector(`[data-areaidx="${idx}"]`);
+      const nuevoValor = input.value.trim();
+      const msg = document.getElementById("msgAreas");
+      if(!nuevoValor){ showMsg(msg,"El nombre no puede estar vacío.",true); return; }
+      const nuevaLista = [...areas];
+      nuevaLista[idx] = nuevoValor;
+      await db.collection(COL_CONFIG).doc("areas").update({lista: nuevaLista});
+      showMsg(msg, "Área actualizada ✅ (los movimientos históricos conservan el nombre anterior)", false);
+    });
+  });
+
+  tb.querySelectorAll("[data-delarea]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      const idx = parseInt(btn.dataset.delarea);
+      const nombre = areas[idx];
+      if(!confirm(`¿Eliminar "${nombre}" de las áreas disponibles? El historial de movimientos ya registrados con esta área no se modifica.`)) return;
+      const nuevaLista = areas.filter((_,i)=>i!==idx);
+      await db.collection(COL_CONFIG).doc("areas").update({lista: nuevaLista});
+    });
+  });
+}
+
+document.getElementById("btnAgregarArea").addEventListener("click", async ()=>{
+  const input = document.getElementById("cfgNuevaArea");
+  const nombre = input.value.trim();
+  const msg = document.getElementById("msgAreas");
+  if(!nombre){ showMsg(msg,"Escribí un nombre de área.",true); return; }
+  if(areas.includes(nombre)){ showMsg(msg,"Esa área ya existe.",true); return; }
+  await db.collection(COL_CONFIG).doc("areas").set({lista: [...areas, nombre]});
+  input.value = "";
+  showMsg(msg, "Área agregada ✅", false);
+});
 
 /* ---------- REGISTRAR MOVIMIENTO ---------- */
 function renderSelectInsumo(){
@@ -512,9 +600,8 @@ function renderAnalisis(){
   drawChart("chartInsumo", Object.keys(porInsumo), Object.values(porInsumo), "#1d4e89");
 
   // por area
-  const AREAS = ["PAO","Administración","Profesionales","PAMI","PAMI Pucará"];
   const porArea = {};
-  AREAS.forEach(a=>porArea[a]=0);
+  areas.forEach(a=>porArea[a]=0);
   movs.forEach(m=>{ if(m.area) porArea[m.area] = (porArea[m.area]||0) + m.cantidad; });
   drawChart("chartArea", Object.keys(porArea), Object.values(porArea), "#2e9e5b");
 
@@ -523,7 +610,7 @@ function renderAnalisis(){
   const head = document.getElementById("cruceHead");
   head.innerHTML = "<th>Área</th>" + insumoNombres.map(n=>`<th>${n}</th>`).join("");
   const body = document.getElementById("cruceBody");
-  body.innerHTML = AREAS.map(area=>{
+  body.innerHTML = areas.map(area=>{
     const cells = insumoNombres.map(n=>{
       const total = movs.filter(m=>m.area===area && m.insumoNombre===n).reduce((s,m)=>s+m.cantidad,0);
       return `<td>${total || "-"}</td>`;
@@ -627,6 +714,47 @@ document.getElementById("btnAgregarInsumo").addEventListener("click", async ()=>
     document.getElementById("cfgStockInicial").value = "0";
   }catch(e){
     showMsg(msg, "Error: " + e.message, true);
+  }
+});
+
+/* ---------- EXPORTAR EXCEL ---------- */
+document.getElementById("btnExportarExcel").addEventListener("click", async ()=>{
+  const btn = document.getElementById("btnExportarExcel");
+  const msg = document.getElementById("msgExportar");
+  btn.disabled = true;
+  btn.textContent = "Generando…";
+  try{
+    const snap = await db.collection(COL_MOVS).orderBy("fecha","desc").get();
+    const filas = snap.docs.map(d=>{
+      const m = d.data();
+      const insumo = insumos.find(i=>i.id===m.insumoId);
+      return {
+        "Fecha": m.fecha,
+        "Tipo": m.tipo==="retiro" ? "Retiro" : "Ingreso",
+        "Insumo": m.insumoNombre,
+        "Cantidad": m.cantidad,
+        "Unidad": insumo ? insumo.unidad : "",
+        "Área": m.area || "",
+        "Quién retira": m.quien || "",
+        "Nota": m.nota || ""
+      };
+    });
+    if(filas.length===0){
+      showMsg(msg, "Todavía no hay movimientos para exportar.", true);
+      return;
+    }
+    const ws = XLSX.utils.json_to_sheet(filas);
+    ws["!cols"] = [{wch:12},{wch:9},{wch:14},{wch:10},{wch:10},{wch:16},{wch:16},{wch:26}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Movimientos");
+    const hoy = new Date().toISOString().slice(0,10);
+    XLSX.writeFile(wb, `movimientos_insumos_${hoy}.xlsx`);
+    showMsg(msg, `Excel descargado con ${filas.length} movimientos ✅`, false);
+  }catch(e){
+    showMsg(msg, "Error al generar el Excel: " + e.message, true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "📥 Descargar Excel";
   }
 });
 
